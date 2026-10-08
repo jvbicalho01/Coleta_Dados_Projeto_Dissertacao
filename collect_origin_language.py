@@ -7,11 +7,11 @@ import re
 from collections import defaultdict
 from dotenv import load_dotenv
 
-# Carrega as variáveis de ambiente do arquivo .env
+# Load environment variables from .env file
 load_dotenv()
 
 # ==========================================
-# CONFIGURAÇÕES
+# CONFIGURATION
 # ==========================================
 GITHUB_TOKEN = os.getenv('GITHUB_TOKEN')
 HEADERS = {
@@ -19,29 +19,30 @@ HEADERS = {
     'Accept': 'application/vnd.github.v3+json'
 }
 
-# Arquivo gerado pelo seu filtro de 1000 estrelas
-ARQUIVO_ENTRADA = 'repos_rust_1000_stars.csv'
-ARQUIVO_SAIDA = 'repos_origin_language.csv'
-ARQUIVO_YAML = 'languages.yml'
+# Input file from the 1000-star filter
+INPUT_FILE = 'repos_rust_1000_stars.csv'
+OUTPUT_FILE = 'repos_origin_language.csv'
+YAML_FILE = 'languages.yml'
 
-# Diretórios ignorados para não poluir a análise
+# Directories ignored to avoid skewing code volume analysis
 IGNORED_DIRS = {
     'vendor', 'node_modules', 'docs', 'build', 'dist', 
     'out', 'target', 'bin', 'obj', 'venv', '.venv', 'bower_components'
 }
 
 # ==========================================
-# CARREGAMENTO DO LINGUIST
+# LINGUIST RULES LOADING
 # ==========================================
-def carregar_mapa_linguagens(caminho_yaml):
-    print(f"Carregando heurísticas do {caminho_yaml}...")
+def load_language_map(yaml_path):
+    """Parses Linguist languages.yml to build extension and filename mappings."""
+    print(f"Loading heuristics from {yaml_path}...")
     ext_map = {
         '.rs': 'Rust', '.md': 'IGNORE', '.m': 'Objective-C', '.ts': 'TypeScript'
     }
     filename_map = {}
     
     try:
-        with open(caminho_yaml, 'r', encoding='utf-8') as f:
+        with open(yaml_path, 'r', encoding='utf-8') as f:
             languages_data = yaml.safe_load(f)
             
         for lang_name, config in languages_data.items():
@@ -59,29 +60,29 @@ def carregar_mapa_linguagens(caminho_yaml):
                 if fn_lower not in filename_map:
                     filename_map[fn_lower] = lang_name
                     
-        print(f"Sucesso! {len(ext_map)} extensões e {len(filename_map)} arquivos mapeados.\n")
+        print(f"Success! {len(ext_map)} extensions and {len(filename_map)} filenames mapped.\n")
         return ext_map, filename_map
         
     except Exception as e:
-        print(f"Erro ao carregar o arquivo YAML: {e}")
+        print(f"Error loading YAML file: {e}")
         return {}, {}
 
 # ==========================================
-# FUNÇÕES DE API E RATE LIMIT
+# API UTILITIES & RATE LIMITING
 # ==========================================
-def aguardar_rate_limit(headers):
-    """Pausa a execução se o limite de requisições da API do GitHub for atingido."""
+def wait_for_rate_limit(headers):
+    """Pauses execution if GitHub API rate limit threshold is reached."""
     remaining = int(headers.get('X-RateLimit-Remaining', 1))
     if remaining < 5:
         reset_time = int(headers.get('X-RateLimit-Reset', time.time() + 3600))
         sleep_time = max(0, reset_time - time.time()) + 5
-        print(f"\n[!] Limite da API atingido. Aguardando {sleep_time:.0f} segundos para o reset...")
+        print(f"\n[!] API rate limit reached. Waiting {sleep_time:.0f} seconds for reset...")
         time.sleep(sleep_time)
 
-def obter_ultima_pagina(url):
-    """Descobre o total de páginas lendo o cabeçalho 'Link'."""
+def get_last_page(url):
+    """Determines the last available page number via GitHub Link headers."""
     response = requests.get(url, headers=HEADERS, timeout=15)
-    aguardar_rate_limit(response.headers)
+    wait_for_rate_limit(response.headers)
     
     if response.status_code != 200:
         return 0
@@ -93,52 +94,50 @@ def obter_ultima_pagina(url):
     return 1
 
 # ==========================================
-# DESCOBERTA DA MATURIDADE E LINGUAGEM
+# MATURITY DETECTION & LANGUAGE EXTRACTION
 # ==========================================
-def obter_sha_alvo(owner_repo, total_commits_csv, total_releases_csv):
-    """Tenta encontrar a 1ª Release; se não houver, calcula os 10% direto com o valor do CSV."""
+def get_target_sha(owner_repo, total_commits_csv, total_releases_csv):
+    """Retrieves target SHA via 1st Release or falls back to the 10% commit checkpoint."""
     try:
         if total_releases_csv > 0:
             url_releases = f'https://api.github.com/repos/{owner_repo}/releases?per_page=1'
-            total_releases = obter_ultima_pagina(url_releases)
+            total_releases = get_last_page(url_releases)
             
             if total_releases > 0:
-                resp_primeira_release = requests.get(f'{url_releases}&page={total_releases}', headers=HEADERS, timeout=15)
-                aguardar_rate_limit(resp_primeira_release.headers)
-                if resp_primeira_release.status_code == 200:
-                    dados_release = resp_primeira_release.json()
-                    if dados_release:
-                        # TRADUZIDO: "Primeira Release" -> "First Release"
-                        return dados_release[0]['tag_name'], "First Release"
+                first_release_resp = requests.get(f'{url_releases}&page={total_releases}', headers=HEADERS, timeout=15)
+                wait_for_rate_limit(first_release_resp.headers)
+                if first_release_resp.status_code == 200:
+                    release_data = first_release_resp.json()
+                    if release_data:
+                        return release_data[0]['tag_name'], "First Release"
 
         if total_commits_csv > 0:
-            commit_dez_porcento = max(1, int(total_commits_csv * 0.1))
-            pagina_alvo = total_commits_csv - commit_dez_porcento + 1
+            ten_percent_commit = max(1, int(total_commits_csv * 0.1))
+            target_page = total_commits_csv - ten_percent_commit + 1
             
-            url_commit_alvo = f'https://api.github.com/repos/{owner_repo}/commits?per_page=1&page={pagina_alvo}'
-            resp_commit = requests.get(url_commit_alvo, headers=HEADERS, timeout=15)
-            aguardar_rate_limit(resp_commit.headers)
+            target_commit_url = f'https://api.github.com/repos/{owner_repo}/commits?per_page=1&page={target_page}'
+            commit_resp = requests.get(target_commit_url, headers=HEADERS, timeout=15)
+            wait_for_rate_limit(commit_resp.headers)
             
-            if resp_commit.status_code == 200:
-                dados_commit = resp_commit.json()
-                if dados_commit:
-                    # TRADUZIDO: Formato do commit
-                    return dados_commit[0]['sha'], f"10% Commit ({commit_dez_porcento}/{total_commits_csv})"
-            elif resp_commit.status_code == 422:
+            if commit_resp.status_code == 200:
+                commit_data = commit_resp.json()
+                if commit_data:
+                    return commit_data[0]['sha'], f"10% Commit ({ten_percent_commit}/{total_commits_csv})"
+            elif commit_resp.status_code == 422:
                 return None, "Error: Commits mismatch with CSV"
                     
         return None, "Empty / Failed"
     except Exception as e:
-        print(f" Erro ao buscar SHA de {owner_repo}: {e}")
+        print(f" Error fetching SHA for {owner_repo}: {e}")
         return None, "Error"
 
-def obter_linguagem_predominante(owner_repo, sha, ext_map, filename_map):
-    """Analisa a árvore de arquivos no exato milissegundo do SHA alvo."""
+def get_predominant_language(owner_repo, sha, ext_map, filename_map):
+    """Analyzes the Git tree at the exact target SHA to extract byte volume per language."""
     url = f"https://api.github.com/repos/{owner_repo}/git/trees/{sha}?recursive=1"
     
     try:
         resp = requests.get(url, headers=HEADERS, timeout=15)
-        aguardar_rate_limit(resp.headers)
+        wait_for_rate_limit(resp.headers)
         
         if resp.status_code != 200:
             return "Tree Error"
@@ -149,18 +148,18 @@ def obter_linguagem_predominante(owner_repo, sha, ext_map, filename_map):
         for item in tree:
             if item['type'] == 'blob':
                 path = item['path']
-                partes_caminho = path.split('/')
+                path_parts = path.split('/')
                 
-                if any(pasta in IGNORED_DIRS for pasta in partes_caminho):
+                if any(folder in IGNORED_DIRS for folder in path_parts):
                     continue
                 
                 size = item.get('size', 0)
-                nome_arquivo = os.path.basename(path)
-                _, ext = os.path.splitext(nome_arquivo)
+                filename = os.path.basename(path)
+                _, ext = os.path.splitext(filename)
                 
                 lang = None
-                if nome_arquivo.lower() in filename_map:
-                    lang = filename_map[nome_arquivo.lower()]
+                if filename.lower() in filename_map:
+                    lang = filename_map[filename.lower()]
                 elif ext.lower() in ext_map:
                     lang = ext_map[ext.lower()]
                     
@@ -173,44 +172,43 @@ def obter_linguagem_predominante(owner_repo, sha, ext_map, filename_map):
         return max(lang_sizes, key=lang_sizes.get)
         
     except Exception as e:
-        print(f" Erro na árvore de {owner_repo}: {e}")
+        print(f" Error parsing tree for {owner_repo}: {e}")
         return "Error"
 
 # ==========================================
-# EXECUÇÃO E CONTROLE DE RETOMADA
+# PROCESSING PIPELINE & RESUME HANDLER
 # ==========================================
-def processar_dataset(csv_entrada, csv_saida, ext_map, filename_map):
-    repos_processados = set()
+def process_dataset(csv_input, csv_output, ext_map, filename_map):
+    processed_repos = set()
     
-    if os.path.exists(csv_saida):
-        with open(csv_saida, mode='r', encoding='utf-8') as f_out_read:
+    if os.path.exists(csv_output):
+        with open(csv_output, mode='r', encoding='utf-8') as f_out_read:
             reader = csv.DictReader(f_out_read)
             repo_column_out = 'name' if 'name' in reader.fieldnames else 'repo'
             for row in reader:
-                repos_processados.add(row[repo_column_out])
-        print(f"Retomando: {len(repos_processados)} repositórios já processados encontrados.")
+                processed_repos.add(row[repo_column_out])
+        print(f"Resuming: {len(processed_repos)} already processed repositories found.")
 
-    with open(csv_entrada, mode='r', encoding='utf-8') as f_in:
+    with open(csv_input, mode='r', encoding='utf-8') as f_in:
         reader = csv.DictReader(f_in)
         repo_column = 'name' if 'name' in reader.fieldnames else 'repo'
         
-        escrever_cabecalho = not os.path.exists(csv_saida) or os.path.getsize(csv_saida) == 0
+        write_header = not os.path.exists(csv_output) or os.path.getsize(csv_output) == 0
         
-        with open(csv_saida, mode='a', newline='', encoding='utf-8') as f_out:
-            # TRADUZIDO: Nomes das colunas
+        with open(csv_output, mode='a', newline='', encoding='utf-8') as f_out:
             fieldnames = reader.fieldnames + ['target_sha', 'discovery_method', 'origin_language']
             writer = csv.DictWriter(f_out, fieldnames=fieldnames)
             
-            if escrever_cabecalho:
+            if write_header:
                 writer.writeheader()
             
             for idx, row in enumerate(reader, 1):
                 owner_repo = row[repo_column]
                 
-                if owner_repo in repos_processados:
+                if owner_repo in processed_repos:
                     continue
                     
-                print(f"[{idx}] Analisando: {owner_repo}...", end=" ", flush=True)
+                print(f"[{idx}] Analyzing: {owner_repo}...", end=" ", flush=True)
                 
                 try:
                     total_commits_csv = int(float(row.get('commits', 0)))
@@ -222,32 +220,32 @@ def processar_dataset(csv_entrada, csv_saida, ext_map, filename_map):
                 except (ValueError, TypeError):
                     total_releases_csv = 0
                 
-                sha, metodo = obter_sha_alvo(owner_repo, total_commits_csv, total_releases_csv)
+                sha, method = get_target_sha(owner_repo, total_commits_csv, total_releases_csv)
                 
                 if sha:
-                    lang = obter_linguagem_predominante(owner_repo, sha, ext_map, filename_map)
+                    lang = get_predominant_language(owner_repo, sha, ext_map, filename_map)
                     row['target_sha'] = sha
-                    row['discovery_method'] = metodo
+                    row['discovery_method'] = method
                     row['origin_language'] = lang
-                    print(f"[{lang}] via {metodo}")
+                    print(f"[{lang}] via {method}")
                 else:
                     row['target_sha'] = "ERROR"
-                    row['discovery_method'] = metodo
+                    row['discovery_method'] = method
                     row['origin_language'] = "ERROR"
-                    print("[FALHA]")
+                    print("[FAILED]")
                     
                 writer.writerow(row)
 
 if __name__ == '__main__':
     if not GITHUB_TOKEN or GITHUB_TOKEN == 'SEU_TOKEN_AQUI':
-        print("Aviso: Configure o arquivo .env com o seu GITHUB_TOKEN.")
-    elif not os.path.exists(ARQUIVO_YAML):
-        print(f"Erro: O arquivo '{ARQUIVO_YAML}' não foi encontrado.")
-    elif not os.path.exists(ARQUIVO_ENTRADA):
-        print(f"Erro: O arquivo '{ARQUIVO_ENTRADA}' não foi encontrado.")
+        print("Warning: Configure your .env file with a valid GITHUB_TOKEN.")
+    elif not os.path.exists(YAML_FILE):
+        print(f"Error: File '{YAML_FILE}' was not found.")
+    elif not os.path.exists(INPUT_FILE):
+        print(f"Error: File '{INPUT_FILE}' was not found.")
     else:
-        mapa_extensoes, mapa_arquivos = carregar_mapa_linguagens(ARQUIVO_YAML)
-        if mapa_extensoes or mapa_arquivos:
-            print("Iniciando extração do histórico baseada em maturidade...")
-            processar_dataset(ARQUIVO_ENTRADA, ARQUIVO_SAIDA, mapa_extensoes, mapa_arquivos)
-            print("\nDataset gerado com sucesso!")
+        ext_map, filename_map = load_language_map(YAML_FILE)
+        if ext_map or filename_map:
+            print("Starting maturity-based history extraction...")
+            process_dataset(INPUT_FILE, OUTPUT_FILE, ext_map, filename_map)
+            print("\nDataset generated successfully!")
